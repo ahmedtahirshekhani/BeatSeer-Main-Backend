@@ -18,6 +18,7 @@ import anthropic
 import json
 import musicbrainzngs
 # Set up MusicBrainz API
+from pymongo import MongoClient
 musicbrainzngs.set_useragent("BeetSeer_AI_Backend", "1.0", "ahmedtahir.developer@gmail.com")
 
 # Function to get artist country
@@ -47,14 +48,158 @@ app.add_middleware(
 def read_root():
     return {"message": "Hello, FastAPI!"}
 
+MONGODB_URI=os.getenv("MONGODB_URI")
+
+def collect_lastfm():
+    url = 'https://www.last.fm/charts/weekly?page=0'
+    html_data = requests.get(url).text
+    soup = BeautifulSoup(html_data, 'html.parser')
+    date_range = soup.find("h3").get_text(strip=True)
+    date_range = date_range.replace(" ", "").replace("—", "-").lower()
+    client = MongoClient(MONGODB_URI)
+    db = client.musictrend
+    collection = db.lastfm_top200
+    count = collection.count_documents({})
+    check = collection.find_one({'date_range': date_range})
+    if not check:
+        dfs_list = []
+        for i in range(0, 4):
+            url = f'https://www.last.fm/charts/weekly?page={i+1}'
+            tables = pd.read_html(url)
+            chart_table = tables[0]
+            chart_table["artist_name"] = chart_table["Artist.1"].str.extract(r'^(.*?)(?=\s\d)')
+            main_df = chart_table[['artist_name', 'Listeners', 'Scrobbles']]
+            main_df.reset_index(drop=True, inplace=True)
+            main_df = main_df.copy()
+            main_df.loc[:, 'rank'] = main_df.index + 1 + i * 50
+            main_df.rename(columns={'Listeners': 'listeners', 'Scrobbles': 'scrobbles'}, inplace=True)
+            dfs_list.append(main_df)
+        main_df = pd.concat(dfs_list).reset_index(drop=True)
+        collection.insert_one({'count': count+1, 'data': main_df.to_dict(orient='records'), 'date_range': date_range})
+
+    client.close()
+
+
+
+def get_lastfm_data():
+    collect_lastfm()
+    client = MongoClient(MONGODB_URI)
+    db = client.musictrend
+    collection = db.lastfm_top200
+    data = collection.find().sort('_id', -1).limit(2)
+    df1 = pd.DataFrame(data[0]['data'])
+    df2 = pd.DataFrame(data[1]['data'])
+    
+    client.close()
+    combined_df = pd.merge(df1, df2, on='artist_name', suffixes=('_1', '_2'), how='inner')
+    combined_df['change_listeners'] = ((combined_df['listeners_1'] - combined_df['listeners_2'])/combined_df['listeners_2']) * 100
+    combined_df['change_scrobbles'] = ((combined_df['scrobbles_1'] - combined_df['scrobbles_2'])/combined_df['scrobbles_2']) * 100
+    combined_df['change_perc'] = (combined_df['change_listeners'] + combined_df['change_scrobbles']) / 2
+    return combined_df
+
+
+def fetch_info(html):
+
+    soup = BeautifulSoup(html, 'html.parser')
+
+    artist_name = soup.find('h1', class_='header-new-title').text.strip()
+
+    album_section = soup.find('li', {'itemtype': 'http://schema.org/MusicAlbum'})
+    album_name = album_section.find('h3').text.strip() if album_section else None
+    release_date = album_section.find('p', class_='artist-header-featured-items-item-date').text.strip() if album_section else None
+
+    listeners_tag = soup.find('li', class_='header-metadata-tnew-item')
+    scrobbles_tag = soup.find_all('li', class_='header-metadata-tnew-item')[1]
+    artist_listeners = listeners_tag.find('p').text.strip() if listeners_tag else None
+    artist_scrobbles = scrobbles_tag.find('p').text.strip() if scrobbles_tag else None
+
+    # Convert listeners (handle K and M)
+    def convert_to_number(value):
+        if value:
+            value = value.replace(',', '')  # Remove commas
+            if 'K' in value:
+                return float(value.replace('K', '')) * 1000
+            elif 'M' in value:
+                return float(value.replace('M', '')) * 1_000_000
+            else:
+                return int(value)  # Convert plain numbers
+        return None
+
+    artist_listeners = convert_to_number(artist_listeners)
+    artist_scrobbles = convert_to_number(artist_scrobbles)
+
+
+            
+
+    artist_image_url = soup.find('img', {'alt': album_name})['src'] if album_name else None
+
+    track_section = soup.find('li', {'itemtype': 'http://schema.org/MusicRecording'})
+    track_image_url = track_section.find('img')['src'] if track_section else None
+
+    # Extract genre from "Related Tags"
+    tags_section = soup.find('ul', class_='tags-list')
+    genre = ", ".join([tag.text for tag in tags_section.find_all('a')]) if tags_section else "Unknown"
+
+    # Store the extracted data in a DataFrame
+    df = {
+        'artist': artist_name,
+        'album': album_name,
+        'release_date': release_date,
+        'artist_id': artist_name.lower().replace(' ', '_'),  # Creating an ID
+        'album_type': 'Album',
+        'artist_followers': artist_listeners,
+        'artist_image_url': artist_image_url,
+        'track_image_url': track_image_url,
+        'genre': genre,
+        'followers': artist_listeners
+    }
+
+    return df
+
+
+
+def get_lastfm_new_art():
+    dfs = []
+
+    for i in range(0, 3):
+
+        url = "https://www.last.fm/tag/new/artists?page=" + str(i + 1)
+        html = requests.get(url).text
+
+        soup = BeautifulSoup(html, "html.parser")
+        artists = []
+        for artist_section in soup.find_all("li", class_="big-artist-list-wrap", itemscope=True):
+            artist_name = artist_section.find("h3", class_="big-artist-list-title").get_text(strip=True)
+
+            url = 'https://www.last.fm/music/' + artist_name.replace(' ', '+')
+            html_data = requests.get(url).text
+            artist_det = fetch_info(html_data)    
+            artists.append(artist_det)    
+        dfs.append(pd.DataFrame(artists))
+
+
+
+    df = pd.concat(dfs).reset_index(drop=True)
+    df['artist'] = df['artist'].str.lower()
+    df['artist'] = df['artist'].str.strip()
+    df = df.dropna(subset=['artist'])
+    df = df.drop_duplicates(subset=['artist'])
+    df = df.reset_index(drop=True)
+    df['popularity'] = df['artist_followers'] / df['artist_followers'].sum() * 100
+    df['popularity'] = df['popularity'].round(2)
+    return df
+
+
+
+
 # Define another route with path parameters
 @app.get("/news-letter")
-
 def get_newsletter_data(
     youTubeApiKey: str = Query(...),
     spotify_CLIENT_ID: str = Query(...),
     spotify_CLIENT_SECRET: str = Query(...)
     ):
+
     if youTubeApiKey and spotify_CLIENT_ID and spotify_CLIENT_SECRET:
         CLIENT_ID = spotify_CLIENT_ID
         CLIENT_SECRET = spotify_CLIENT_SECRET
@@ -124,9 +269,23 @@ def get_newsletter_data(
         df = pd.concat([df, df2])
         df.drop_duplicates(subset=['artist', 'title'], inplace=True)
         # ascending=False will sort the values in descending order
+        
         df.sort_values('trending_percent', ascending=False, inplace=True)
         df.drop_duplicates(subset=['artist_id'], inplace=True)
         df = df.reset_index(drop=True)
+        lastfm_data = get_lastfm_data()
+        lastfm_data = lastfm_data.dropna(subset=['artist_name'])
+        lastfm_data['artist_name'] = lastfm_data['artist_name'].str.lower()
+        lastfm_data['artist_name'] = lastfm_data['artist_name'].str.strip()
+        df = df.dropna(subset=['artist'])
+        df['artist'] = df['artist'].str.lower()
+        df['artist'] = df['artist'].str.strip()
+
+        combine_spotify_lastfm_df = pd.merge(lastfm_data, df, left_on='artist_name', right_on='artist', how='inner')
+        combine_spotify_lastfm_df['trending_percent'] = (combine_spotify_lastfm_df['trending_percent'] + combine_spotify_lastfm_df['change_perc']) / 2
+        
+        df = combine_spotify_lastfm_df.copy()
+     
 
 
         def get_artists(art_ids):
@@ -136,11 +295,11 @@ def get_newsletter_data(
         for i in range(0, df.shape[0], 50):
             art_ids = df.loc[i:i+49, 'artist_id'].tolist()
             arts = get_artists(art_ids)
-            arts_list = arts['artists']
+            arts_list = arts['artists'].str.lower()
             genres = [art['genres'][0] if len(art['genres']) > 0 else '' for art in arts_list]
             df.loc[i:i+49, 'genre'] = genres
+        
 
-        # List of dead artists (from previous Python list)
         dead_artists = [
             "Elvis Presley", "John Lennon", "Jimi Hendrix", "Jim Morrison", "Kurt Cobain", 
             "David Bowie", "Freddie Mercury", "George Harrison", "Amy Winehouse", "Prince", 
@@ -157,20 +316,14 @@ def get_newsletter_data(
             "Aaliyah", "Big L", "Vangelis", "Glenn Gould", "Leonard Cohen", "Paco de Lucía", 
             "Celia Cruz"
         ]
-
-        # Filter out dead artists
+        dead_artists = [artist.lower() for artist in dead_artists]
         df_obs = df[~df['artist'].isin(dead_artists)]
-
-
-        # group by genre and avg trending_percent and get top 5 genres with upword trend and top 5 genres with downward trend
-        # ignore trending_percent with 1 or -1
         df_obs = df_obs[(df_obs['trending_percent'] != 1) & (df_obs['trending_percent'] != -1)]
         grouped = df_obs.groupby('genre')['trending_percent'].mean()
         grouped = grouped.reset_index()
         grouped = grouped.sort_values('trending_percent', ascending=False)
         top5_upward_genres = grouped.head(5)
         top5_downward_genres = grouped.tail(5).sort_values('trending_percent', ascending=True)
-
 
         # group by artist and avg trending_percent and get top 5 artist with upword trend and top 5 artist with downward trend
         # ignore trending_percent with 1 or -1
@@ -237,6 +390,12 @@ def get_newsletter_data(
 
         # Extract the top 5 emerging artists with all requested fields
         filtered_album_artist = new_album_artist[new_album_artist['album_type'] == 'single']
+        lastfm_new_art = get_lastfm_new_art()
+        filtered_album_artist = pd.concat([filtered_album_artist, lastfm_new_art])
+        filtered_album_artist.drop_duplicates(subset=['artist'], inplace=True)
+        filtered_album_artist = filtered_album_artist.reset_index(drop=True)
+        filtered_album_artist['followers'] = filtered_album_artist['followers'].astype(int)
+        filtered_album_artist = filtered_album_artist[filtered_album_artist['followers'] > 10000]
         top_5_emerging_artists = filtered_album_artist.sort_values('popularity', ascending=True).head(10).reset_index(drop=True)
         # print("Spotify data", top_5_emerging_artists)
 
@@ -416,7 +575,6 @@ def get_newsletter_data(
 
             print(tabulate(updated_df_yt_data, headers='keys', tablefmt='pretty', showindex=False))
             return updated_df_yt_data
-        # print("top_5_emerging_artists: ", top_5_emerging_artists)
         top_5_emerging_artists = update_df_with_yt_data(top_5_emerging_artists)
 
         def update_df_with_yt_data_top5_downward_artists(df_yt_data):
@@ -521,9 +679,7 @@ def get_newsletter_data(
 
 
 
-        # social_growth = popularity * 2
         top_5_emerging_artists['social_growth'] = top_5_emerging_artists['popularity'] * 2
-        # Monthy streams = views * 2
         top_5_emerging_artists['views'] = top_5_emerging_artists['views'].astype(int)
         top_5_emerging_artists['monthly_streams'] = top_5_emerging_artists['views'] * 2
 
@@ -659,10 +815,7 @@ def get_newsletter_data(
                 final_object['emerging_artists_for_film'] = emerging_artists_for_film
             if established_artists_for_film is not None:
                 final_object['established_artists_for_film'] = established_artists_for_film
-            # if rising_star is not None:
-            #     final_object['rising_star'] = rising_star
-            # if rising_star_data is not None:
-            #     final_object['rising_star_data'] = rising_star_data
+            
             return final_object
 
         final_object = get_final_object(top5_upward_genres_req, top5_downward_genres_req, top5_upward_artists_req, top5_downward_artists_req, top_5_emerging_artists_req,  emerging_artists_for_film=resp_emerg,
