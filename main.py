@@ -396,6 +396,8 @@ def get_newsletter_data(
         filtered_album_artist = filtered_album_artist.reset_index(drop=True)
         filtered_album_artist['followers'] = filtered_album_artist['followers'].astype(int)
         filtered_album_artist = filtered_album_artist[filtered_album_artist['followers'] > 10000]
+        filtered_album_artist = filtered_album_artist[filtered_album_artist['genre'] != 'Unknown']
+
         top_5_emerging_artists = filtered_album_artist.sort_values('popularity', ascending=True).head(10).reset_index(drop=True)
         # print("Spotify data", top_5_emerging_artists)
 
