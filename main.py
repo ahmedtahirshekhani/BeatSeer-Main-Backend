@@ -19,8 +19,10 @@ import json
 import musicbrainzngs
 # Set up MusicBrainz API
 from pymongo import MongoClient
+import  datetime 
+from datetime import datetime, timedelta
 musicbrainzngs.set_useragent("BeetSeer_AI_Backend", "1.0", "ahmedtahir.developer@gmail.com")
-
+import re
 # Function to get artist country
 def get_artist_country(artist_name):
     try:
@@ -50,12 +52,33 @@ def read_root():
 
 MONGODB_URI=os.getenv("MONGODB_URI")
 
+def get_date_range():
+
+
+    def last_friday():
+        today = datetime.today()
+        days_since_friday = (today.weekday() - 4) % 7  # 4 represents Friday
+        last_friday_date = today - timedelta(days=days_since_friday if days_since_friday else 7)
+        return last_friday_date
+
+    start7days = pd.to_datetime(last_friday()) - timedelta(days=7)
+
+    date_range = start7days.strftime('%d%b%Y').lower() + '-' + last_friday().strftime('%d%b%Y').lower()
+    formatted_date_range = re.sub(r'\b0(\d)', r'\1', date_range)
+    return formatted_date_range
+
+
+
 def collect_lastfm():
     url = 'https://www.last.fm/charts/weekly?page=0'
     html_data = requests.get(url).text
     soup = BeautifulSoup(html_data, 'html.parser')
-    date_range = soup.find("h3").get_text(strip=True)
-    date_range = date_range.replace(" ", "").replace("—", "-").lower()
+    date_range = get_date_range()
+    if soup.find("h3") is None:
+        date_range = soup.find("h3").get_text(strip=True)
+        date_range = date_range.replace(" ", "").replace("—", "-").lower()
+        date_range = re.sub(r'\b0(\d)', r'\1', date_range)
+
     client = MongoClient(MONGODB_URI)
     db = client.musictrend
     collection = db.lastfm_top200
