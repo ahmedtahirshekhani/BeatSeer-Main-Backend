@@ -283,7 +283,7 @@ def get_newsletter_data(
             df_f.fillna({'track_id': ''}, inplace=True)
             df_f.fillna({'trending_percent': 1}, inplace=True)
             df_f['country'] = df_f['artist'].apply(get_artist_country)
-            df_filtered = df_f[~df_f['country'].isin(['RU', 'CN'])]
+            df_filtered = df_f[df_f['country'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
 
             return df_filtered
 
