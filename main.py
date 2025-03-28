@@ -75,9 +75,14 @@ def collect_lastfm():
     soup = BeautifulSoup(html_data, 'html.parser')
     date_range = get_date_range()
     if soup.find("h3") is None:
-        date_range = soup.find("h3").get_text(strip=True)
-        date_range = date_range.replace(" ", "").replace("—", "-").lower()
-        date_range = re.sub(r'\b0(\d)', r'\1', date_range)
+        try:
+            date_range = soup.find("h3").get_text(strip=True)
+            date_range = date_range.replace(" ", "").replace("—", "-").lower()
+            date_range = re.sub(r'\b0(\d)', r'\1', date_range)
+        except:
+            date_range = get_date_range()
+
+        
 
     client = MongoClient(MONGODB_URI)
     db = client.musictrend
