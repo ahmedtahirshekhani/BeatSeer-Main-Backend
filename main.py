@@ -6,7 +6,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from io import StringIO
 from datetime import datetime
-
+import numpy as np
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -819,7 +819,12 @@ def get_newsletter_data(
 
 
         top_5_emerging_artists['social_growth'] = top_5_emerging_artists['popularity'] * 2
-        top_5_emerging_artists['views'] = top_5_emerging_artists['views'].astype(int)
+        top_5_emerging_artists['views'] = (
+            top_5_emerging_artists['views']
+            .replace([np.inf, -np.inf], 0)
+            .fillna(0)
+            .astype('int64')
+        )
         top_5_emerging_artists['monthly_streams'] = top_5_emerging_artists['views'] * 2
 
 
