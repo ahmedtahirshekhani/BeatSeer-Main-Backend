@@ -23,26 +23,51 @@ import  datetime
 from datetime import datetime, timedelta
 musicbrainzngs.set_useragent("BeetSeer_AI_Backend", "1.0", "ahmedtahir.developer@gmail.com")
 import re
-# Function to get artist country
-def get_artist_country(artist_name):
-    try:
-        result = musicbrainzngs.search_artists(artist=artist_name, limit=1)
-        if 'artist-list' in result and len(result['artist-list']) > 0:
-            return result['artist-list'][0].get('country', 'Unknown')
-    except Exception as e:
-        print(f"Error fetching country for {artist_name}: {e}")
-    return 'Unknown'
+import time
+
+
+MONGODB_URI=os.getenv("MONGODB_URI")
+
+
+def get_artist_countries(artist_names):
+    # print(artist_names)
+    client = MongoClient(MONGODB_URI)
+    db = client["musictrend"] 
+    collection = db["artist_countries"]
+    artist_countries = {}
+
+    existing_data = {doc["_id"]: doc["country"] for doc in collection.find({"_id": {"$in": list(artist_names)}})}
+    print("artist_names", list(artist_names))
+    print("existing_data", list(existing_data.keys()))
+    missing_artists = [artist for artist in list(artist_names) if artist not in list(existing_data.keys())]
+    print(missing_artists)
+
+    for artist in missing_artists:
+        try:
+            result = musicbrainzngs.search_artists(artist=artist, limit=1)
+            country = result['artist-list'][0].get('country', 'Unknown') if result.get('artist-list') else 'Unknown'
+            artist_countries[artist] = country
+        except Exception as e:
+            print(f"Error fetching country for {artist}: {e}")
+            artist_countries[artist] = 'Unknown'
+
+    if artist_countries:
+        collection.insert_many([{"_id": artist, "country": country} for artist, country in artist_countries.items()])
+    print(artist_countries)
+    client.close()
+    return {**existing_data, **artist_countries}
+
+
 
 
 app = FastAPI()
 
-# Allow git ORS for all origins (or set specific origins for better security)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins, change for more restrictive policy
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"], 
+    allow_headers=["*"],
 )
 
 # Example endpoint
@@ -50,7 +75,6 @@ app.add_middleware(
 def read_root():
     return {"message": "Hello, FastAPI!"}
 
-MONGODB_URI=os.getenv("MONGODB_URI")
 
 def get_date_range():
 
@@ -70,6 +94,7 @@ def get_date_range():
 
 
 def collect_lastfm():
+    print("Collecting LastFM data")
     url = 'https://www.last.fm/charts/weekly?page=0'
     html_data = requests.get(url).text
     soup = BeautifulSoup(html_data, 'html.parser')
@@ -106,10 +131,12 @@ def collect_lastfm():
         collection.insert_one({'count': count+1, 'data': main_df.to_dict(orient='records'), 'date_range': date_range})
 
     client.close()
+    print("LastFM data collected")
 
 
 
 def get_lastfm_data():
+    print("Getting LastFM data")
     collect_lastfm()
     client = MongoClient(MONGODB_URI)
     db = client.musictrend
@@ -123,10 +150,13 @@ def get_lastfm_data():
     combined_df['change_listeners'] = ((combined_df['listeners_1'] - combined_df['listeners_2'])/combined_df['listeners_2']) * 100
     combined_df['change_scrobbles'] = ((combined_df['scrobbles_1'] - combined_df['scrobbles_2'])/combined_df['scrobbles_2']) * 100
     combined_df['change_perc'] = (combined_df['change_listeners'] + combined_df['change_scrobbles']) / 2
+
+    print("LastFM data fetched")
     return combined_df
 
 
 def fetch_info(html):
+
 
     soup = BeautifulSoup(html, 'html.parser')
 
@@ -157,9 +187,13 @@ def fetch_info(html):
     artist_scrobbles = convert_to_number(artist_scrobbles)
 
 
-            
+    div = soup.find('div', class_='header-new-background-image')
+    if div:
+        style = div.get('style', '')
+        artist_image_url = style.split('url(')[-1].split(')')[0] if 'url(' in style else None
+    else:
+        artist_image_url = soup.find('img', {'alt': album_name})['src'] if album_name else None
 
-    artist_image_url = soup.find('img', {'alt': album_name})['src'] if album_name else None
 
     track_section = soup.find('li', {'itemtype': 'http://schema.org/MusicRecording'})
     track_image_url = track_section.find('img')['src'] if track_section else None
@@ -218,6 +252,116 @@ def get_lastfm_new_art():
     return df
 
 
+def fetch_or_update_kworb_data(date_range, category='global_daily'):
+    client = MongoClient(MONGODB_URI)
+    db = client["musictrend"]
+    collection = db["kworb_spotify"]
+    key_name_db = f"{date_range}_{category or 'daily'}"
+    print(f'Fetching data from MongoDB, key_name_db: {key_name_db}')
+    existing_data = collection.find_one({"_id": key_name_db})
+
+    if existing_data:
+        return existing_data["data"]
+
+    df = get_kworb_spotify_data(category)
+    collection.insert_one({"_id": key_name_db, "data": df.to_dict("records")})
+    client.close()
+    return df
+
+def get_kworb_spotify_data(country='global_daily'):
+        
+
+        url = f'https://kworb.net/spotify/country/{country}.html'
+        print("Fetching data from", url)
+        response = requests.get(url)
+        response.encoding = 'utf-8'
+        html_content = StringIO(response.text)
+        
+
+        tables = pd.read_html(html_content)
+
+        df = tables[0]
+
+        artist_ids = []
+        track_ids = []
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        for td in soup.find_all('td', class_='text mp'):
+            links = td.find_all('a')
+            if len(links) > 0:
+                artist_href = links[0]['href']
+                track_href = links[1]['href']
+
+                # Extract the artist_id and track_id (they are part of the href)
+                artist_id = artist_href.split('/')[-1].replace('.html', '')  # Extracts the artist ID from the URL
+                track_id = track_href.split('/')[-1].replace('.html', '')  # Extracts the track ID from the URL
+
+                artist_ids.append(artist_id)
+                track_ids.append(track_id)
+            else:
+                artist_ids.append(None)
+                track_ids.append(None)
+        
+
+        # Add the extracted IDs as new columns in the DataFrame
+        df_f = pd.DataFrame()
+        df_f['artist_id'] = artist_ids
+        df_f['track_id'] = track_ids
+        df_f['artist'] = df['Artist and Title'].apply(lambda x: x.split(' - ')[0])
+        df_f['title'] = df['Artist and Title'].apply(lambda x: x.split(' - ')[1])
+        if country == 'global_daily':
+            df_f['trending_percent'] = df['7Day+'] / df['7Day']
+            df_f['Streams'] = df['7Day']
+            df_f['Streams+'] = df['7Day+']
+        else:
+            df_f['trending_percent'] = df['Streams+'] / df['Streams']
+            df_f['Streams'] = df['Streams']
+            df_f['Streams+'] = df['Streams+']
+
+        df_f['P+'] = df['P+']
+        df_f.fillna({'artist_id': ''}, inplace=True)
+        df_f.fillna({'track_id': ''}, inplace=True)
+        df_f.fillna({'trending_percent': 1}, inplace=True)
+        # drop duplicates artist
+        df_f.drop_duplicates(subset=['artist'], inplace=True)
+        df_f['artist'] = df_f['artist'].str.lower().str.strip()
+        df_f['country'] = get_artist_countries(df_f['artist']).values()
+        df_filtered = df_f[df_f['country'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
+
+        return df_filtered
+
+
+def get_artists(art_ids, sp):
+    try:
+        return sp.artists(art_ids)["artists"]
+    except Exception as e:
+        print(f"Spotify API error: {e}")
+        return []
+
+
+def get_artist_genres(artist_ids, sp):
+    client = MongoClient(MONGODB_URI)
+    db = client["musictrend"]
+    collection = db["artist_genres"]
+    artist_genres = {}
+    existing_data = {doc["_id"]: doc["genre"] for doc in collection.find({"_id": {"$in": artist_ids}})}
+    missing_artists = [artist for artist in artist_ids if artist not in existing_data]
+
+    if missing_artists:
+        for i in range(0, len(missing_artists), 50):
+            batch_ids = missing_artists[i:i+50]
+            artists_data = get_artists(batch_ids, sp)
+            
+            for art in artists_data:
+                artist_id = art["id"]
+                genre = art["genres"][0] if art.get("genres") else ""
+                artist_genres[artist_id] = genre
+                collection.insert_one({"_id": artist_id, "genre": genre})
+
+            time.sleep(1)
+
+    return {**existing_data, **artist_genres}
 
 
 # Define another route with path parameters
@@ -227,7 +371,7 @@ def get_newsletter_data(
     spotify_CLIENT_ID: str = Query(...),
     spotify_CLIENT_SECRET: str = Query(...)
     ):
-
+    print("Getting newsletter data")
     if youTubeApiKey and spotify_CLIENT_ID and spotify_CLIENT_SECRET:
         CLIENT_ID = spotify_CLIENT_ID
         CLIENT_SECRET = spotify_CLIENT_SECRET
@@ -235,72 +379,22 @@ def get_newsletter_data(
         auth_manager = SpotifyClientCredentials(client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
         sp = spotipy.Spotify(auth_manager=auth_manager)
 
-
-        def get_kworb_spotify_data(country='global_daily'):
-            url = f'https://kworb.net/spotify/country/{country}.html'
-            response = requests.get(url)
-            response.encoding = 'utf-8'
-            html_content = StringIO(response.text)
-            
-
-            tables = pd.read_html(html_content)
-
-            df = tables[0]
-
-            artist_ids = []
-            track_ids = []
-
-            soup = BeautifulSoup(response.text, 'html.parser')
-
-            for td in soup.find_all('td', class_='text mp'):
-                links = td.find_all('a')
-                if len(links) > 0:
-                    artist_href = links[0]['href']
-                    track_href = links[1]['href']
-
-                    # Extract the artist_id and track_id (they are part of the href)
-                    artist_id = artist_href.split('/')[-1].replace('.html', '')  # Extracts the artist ID from the URL
-                    track_id = track_href.split('/')[-1].replace('.html', '')  # Extracts the track ID from the URL
-
-                    artist_ids.append(artist_id)
-                    track_ids.append(track_id)
-                else:
-                    artist_ids.append(None)
-                    track_ids.append(None)
-
-            # Add the extracted IDs as new columns in the DataFrame
-            df_f = pd.DataFrame()
-            df_f['artist_id'] = artist_ids
-            df_f['track_id'] = track_ids
-            df_f['artist'] = df['Artist and Title'].apply(lambda x: x.split(' - ')[0])
-            df_f['title'] = df['Artist and Title'].apply(lambda x: x.split(' - ')[1])
-            if country == 'global_daily':
-                df_f['trending_percent'] = df['7Day+'] / df['7Day']
-                df_f['Streams'] = df['7Day']
-                df_f['Streams+'] = df['7Day+']
-            else:
-                df_f['trending_percent'] = df['Streams+'] / df['Streams']
-                df_f['Streams'] = df['Streams']
-                df_f['Streams+'] = df['Streams+']
-
-            df_f['P+'] = df['P+']
-            df_f.fillna({'artist_id': ''}, inplace=True)
-            df_f.fillna({'track_id': ''}, inplace=True)
-            df_f.fillna({'trending_percent': 1}, inplace=True)
-            df_f['country'] = df_f['artist'].apply(get_artist_country)
-            df_filtered = df_f[df_f['country'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
-
-            return df_filtered
-
-        df = get_kworb_spotify_data()
-        df2 = get_kworb_spotify_data('global_weekly')
+        print("Spotify authenticated")
+        date_range = get_date_range()
+        df = fetch_or_update_kworb_data(date_range)  
+        df2 = fetch_or_update_kworb_data(date_range, 'global_weekly')
+        print("Spotify data fetched")
+        print(df, df2)
+        df = pd.DataFrame(df)
+        df2 = pd.DataFrame(df2)
+        
         df = pd.concat([df, df2])
         df.drop_duplicates(subset=['artist', 'title'], inplace=True)
-        # ascending=False will sort the values in descending order
         
         df.sort_values('trending_percent', ascending=False, inplace=True)
         df.drop_duplicates(subset=['artist_id'], inplace=True)
         df = df.reset_index(drop=True)
+        print("Start LastFM data")
         lastfm_data = get_lastfm_data()
         lastfm_data = lastfm_data.dropna(subset=['artist_name'])
         lastfm_data['artist_name'] = lastfm_data['artist_name'].str.lower()
@@ -319,13 +413,20 @@ def get_newsletter_data(
         def get_artists(art_ids):
             data = sp.artists(art_ids)
             return data
+        
 
         for i in range(0, df.shape[0], 50):
             art_ids = df.loc[i:i+49, 'artist_id'].tolist()
-            arts = get_artists(art_ids)
-            arts_list = arts['artists'].str.lower()
-            genres = [art['genres'][0] if len(art['genres']) > 0 else '' for art in arts_list]
+          
+            arts_genre = get_artist_genres(art_ids, sp)
+            print("arts_genre", arts_genre)
+            artist_ids = list(arts_genre.keys()) 
+            genres = [arts_genre.get(artist_id, 'classic') for artist_id in artist_ids]   
+            genres = ['classic' if genre == '' else genre for genre in genres]
+            print("genres", genres)         
             df.loc[i:i+49, 'genre'] = genres
+        
+        print("Spotify data", df['genre'])
         
 
         dead_artists = [
@@ -403,6 +504,12 @@ def get_newsletter_data(
             })
 
             new_album_artist = pd.concat([new_album_artist, df])
+        # drop duplicates artist
+        new_album_artist.drop_duplicates(subset=['artist'], inplace=True)
+        new_album_artist = new_album_artist.reset_index(drop=True)
+        new_album_artist['artist'] = new_album_artist['artist'].str.lower().str.strip()
+        new_album_artist['country'] = get_artist_countries(new_album_artist['artist']).values()
+        new_album_artist = new_album_artist[new_album_artist['country'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
 
         new_album_artist = new_album_artist.reset_index(drop=True)
 
@@ -435,7 +542,9 @@ def get_newsletter_data(
         top5_downward_artists.loc[:, 'trending_percent'] = (top5_downward_artists['trending_percent']*100).round(1)
 
         API_KEY = youTubeApiKey
+        print("API_KEY", API_KEY)
         def update_df_with_yt_data(df_yt_data):
+            
 
             # Function to search for the channel IDs using channel names
             def get_channel_ids(channel_names, most_popular_tracks, df_yt_data):
@@ -833,28 +942,30 @@ def get_newsletter_data(
 
 
         def get_final_object(top5_upward_genres, top5_downward_genres, top5_upward_artists, top5_downward_artists, top_5_emerging_artists, emerging_artists_for_film=None, established_artists_for_film=None):
-            # print("IN final OBJECT")
-            final_object = {}
-            final_object['top5_upward_genres'] = top5_upward_genres.to_dict(orient='records')
-            final_object['top5_downward_genres'] = top5_downward_genres.to_dict(orient='records')
-            final_object['top5_upward_artists'] = top5_upward_artists.to_dict(orient='records')
-            final_object['top5_downward_artists'] = top5_downward_artists.to_dict(orient='records')
-            final_object['top_5_emerging_artists'] = top_5_emerging_artists.to_dict(orient='records')
-             # Add emerging and established artists to the final object
+            final_object = {
+                'top5_upward_genres': top5_upward_genres.fillna('None').to_dict(orient='records'),
+                'top5_downward_genres': top5_downward_genres.fillna('None').to_dict(orient='records'),
+                'top5_upward_artists': top5_upward_artists.fillna('None').to_dict(orient='records'),
+                'top5_downward_artists': top5_downward_artists.fillna('None').to_dict(orient='records'),
+                'top_5_emerging_artists': top_5_emerging_artists.fillna('None').to_dict(orient='records'),
+            }
+
+            # Add emerging and established artists to the final object
             if emerging_artists_for_film is not None:
                 final_object['emerging_artists_for_film'] = emerging_artists_for_film
             if established_artists_for_film is not None:
                 final_object['established_artists_for_film'] = established_artists_for_film
-            
+
             return final_object
 
         final_object = get_final_object(top5_upward_genres_req, top5_downward_genres_req, top5_upward_artists_req, top5_downward_artists_req, top_5_emerging_artists_req,  emerging_artists_for_film=resp_emerg,
     established_artists_for_film=resp_est)
+        
 
-        # print("final_object", final_object)    
+        print("final_object", final_object)    
         return final_object
 
     else:
         raise HTTPException(status_code=400, detail="API key is required")
 
-# get_newsletter_data()
+
