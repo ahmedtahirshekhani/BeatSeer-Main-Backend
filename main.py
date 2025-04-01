@@ -660,7 +660,7 @@ def get_newsletter_data(
                     search_params = {
                         'part': 'snippet',
                         'q': search_query,  # Search for the most popular track name
-                        'type': 'video',  # Only search for videos
+                        # 'type': 'video',  # Only search for videos
                         'key': API_KEY
                     }
                     try:
@@ -670,7 +670,8 @@ def get_newsletter_data(
                         # print(" video Data: ", data['items'])
 
                         if data.get('items'):
-                            video_id = data['items'][0]['id']['videoId']
+                            item_id = data['items'][0]['id']
+                            video_id = item_id.get('videoId') or item_id.get('playlistId')
                             video_title = data['items'][0]['snippet']['title']
 
                             # Get video statistics
