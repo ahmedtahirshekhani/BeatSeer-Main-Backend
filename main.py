@@ -37,15 +37,24 @@ def get_artist_countries(artist_names):
     artist_countries = {}
 
     existing_data = {doc["_id"]: doc["country"] for doc in collection.find({"_id": {"$in": list(artist_names)}})}
-    print("artist_names", list(artist_names))
-    print("existing_data", list(existing_data.keys()))
     missing_artists = [artist for artist in list(artist_names) if artist not in list(existing_data.keys())]
-    print(missing_artists)
+
 
     for artist in missing_artists:
         try:
             result = musicbrainzngs.search_artists(artist=artist, limit=1)
-            country = result['artist-list'][0].get('country', 'Unknown') if result.get('artist-list') else 'Unknown'
+            if result.get('artist-list'):
+                fetched_name = result['artist-list'][0]['name']
+                fetched_country = result['artist-list'][0].get('country', 'Unknown')
+
+                # Compare first word of both names (case-insensitive)
+                if artist.split()[0].lower() == fetched_name.split()[0].lower():
+                    country = fetched_country
+                else:
+                    country = 'Unknown'
+            else:
+                country = 'Unknown'
+
             artist_countries[artist] = country
         except Exception as e:
             print(f"Error fetching country for {artist}: {e}")
@@ -53,9 +62,9 @@ def get_artist_countries(artist_names):
 
     if artist_countries:
         collection.insert_many([{"_id": artist, "country": country} for artist, country in artist_countries.items()])
-    print(artist_countries)
     client.close()
-    return {**existing_data, **artist_countries}
+    sorted_countries = {artist: (existing_data.get(artist) or artist_countries.get(artist, 'Unknown')) for artist in artist_names}
+    return sorted_countries
 
 
 
@@ -150,6 +159,9 @@ def get_lastfm_data():
     combined_df['change_listeners'] = ((combined_df['listeners_1'] - combined_df['listeners_2'])/combined_df['listeners_2']) * 100
     combined_df['change_scrobbles'] = ((combined_df['scrobbles_1'] - combined_df['scrobbles_2'])/combined_df['scrobbles_2']) * 100
     combined_df['change_perc'] = (combined_df['change_listeners'] + combined_df['change_scrobbles']) / 2
+    combined_df['country'] = get_artist_countries(combined_df['artist_name']).values()
+    combined_df = combined_df[combined_df['country'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
+
 
     print("LastFM data fetched")
     return combined_df
@@ -249,6 +261,9 @@ def get_lastfm_new_art():
     df = df.reset_index(drop=True)
     df['popularity'] = df['artist_followers'] / df['artist_followers'].sum() * 100
     df['popularity'] = df['popularity'].round(2)
+    df['country'] = get_artist_countries(df['artist']).values()
+    df = df[df['country'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
+
     return df
 
 
@@ -402,11 +417,15 @@ def get_newsletter_data(
         df = df.dropna(subset=['artist'])
         df['artist'] = df['artist'].str.lower()
         df['artist'] = df['artist'].str.strip()
+        print(lastfm_data['country'], df['country'])
 
         combine_spotify_lastfm_df = pd.merge(lastfm_data, df, left_on='artist_name', right_on='artist', how='inner')
         combine_spotify_lastfm_df['trending_percent'] = (combine_spotify_lastfm_df['trending_percent'] + combine_spotify_lastfm_df['change_perc']) / 2
         
         df = combine_spotify_lastfm_df.copy()
+        print(df[df['artist'].str.contains('Newjeans', case=False, na=False)])
+    
+        
      
 
 
@@ -447,6 +466,9 @@ def get_newsletter_data(
         ]
         dead_artists = [artist.lower() for artist in dead_artists]
         df_obs = df[~df['artist'].isin(dead_artists)]
+        print(df[df['artist'].str.contains('Newjeans', case=False, na=False)])
+
+        df_obs = df_obs[df_obs['country_y'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
         df_obs = df_obs[(df_obs['trending_percent'] != 1) & (df_obs['trending_percent'] != -1)]
         grouped = df_obs.groupby('genre')['trending_percent'].mean()
         grouped = grouped.reset_index()
@@ -462,7 +484,7 @@ def get_newsletter_data(
         grouped = grouped.sort_values('trending_percent', ascending=False)
         top5_upward_artists = grouped.head(5)
         top5_downward_artists = grouped.tail(5).sort_values('trending_percent', ascending=True)
-
+    
         new_release = sp.search(q='tag:new', type='album', limit=50)
         new_release2 = sp.search(q='tag:new', type='album', limit=50, offset=50)
         new_release = new_release['albums']['items'] + new_release2['albums']['items']
@@ -526,15 +548,21 @@ def get_newsletter_data(
         # Extract the top 5 emerging artists with all requested fields
         filtered_album_artist = new_album_artist[new_album_artist['album_type'] == 'single']
         lastfm_new_art = get_lastfm_new_art()
+        print(lastfm_new_art[lastfm_new_art['artist'].str.contains('Newjeans', case=False, na=False)])
+        
         filtered_album_artist = pd.concat([filtered_album_artist, lastfm_new_art])
         filtered_album_artist.drop_duplicates(subset=['artist'], inplace=True)
         filtered_album_artist = filtered_album_artist.reset_index(drop=True)
         filtered_album_artist['followers'] = filtered_album_artist['followers'].astype(int)
         filtered_album_artist = filtered_album_artist[filtered_album_artist['followers'] > 10000]
         filtered_album_artist = filtered_album_artist[filtered_album_artist['genre'] != 'Unknown']
+        print(filtered_album_artist[filtered_album_artist['artist'].str.contains('Newjeans', case=False, na=False)])
+
+
 
         top_5_emerging_artists = filtered_album_artist.sort_values('popularity', ascending=True).head(10).reset_index(drop=True)
-        # print("Spotify data", top_5_emerging_artists)
+        print("top_5_emerging_artists", top_5_emerging_artists)
+        
 
         top5_upward_genres.loc[:, 'trending_percent'] = (top5_upward_genres['trending_percent']*100).round(1)
         top5_downward_genres.loc[:, 'trending_percent'] = (top5_downward_genres['trending_percent']*100).round(1)
@@ -554,12 +582,14 @@ def get_newsletter_data(
                 
                 for channel_name, track_name in zip(channel_names, most_popular_tracks):
                     # Combine channel name and most popular track for the search query
-                    search_query = f"{track_name} {channel_name}"
+                    search_query = f"{channel_name} music official"
                     search_params = {
-                        'part': 'snippet',
+                        'part':'snippet',
                         'q': search_query,
                         'type': 'channel',
-                        'key': API_KEY
+                        'key': API_KEY,
+                        'regionCode': 'US',
+                        'maxResults': 5
                     }
                     try:
                         response = requests.get(search_url, params=search_params)
@@ -656,7 +686,7 @@ def get_newsletter_data(
                 search_url = "https://www.googleapis.com/youtube/v3/search"
                 for channel_name, track_name in zip(channel_titles, most_popular_tracks):
                     # Combine channel name and most popular track for the search query
-                    search_query = f"{track_name} {channel_name}"
+                    search_query = f"{track_name} {channel_name} song official"
                     search_params = {
                         'part': 'snippet',
                         'q': search_query,  # Search for the most popular track name
@@ -859,10 +889,12 @@ def get_newsletter_data(
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         prompt = """
         You are an AI model tasked with providing the following information about recording artists or groups for near-term media projects. Respond strictly in JSON format.
+        Artitst should ONLY be from these countries (["United States", "Canada", "Mexico", "United Kingdom", "France", "Germany", "Italy", "Spain", "Netherlands", "Belgium", "Switzerland", "Austria", "Sweden", "Norway", "Denmark", "Finland", "Ireland", "Portugal", "Luxembourg", "Iceland"])
 
         1. Identify five {{artist_type}} recording artists or groups that would be suitable for films currently in development or production, slated for release within the next 18 months year 2025.
         2. These artists or groups should have an AI-predicted likelihood of maintaining or increasing their popularity over the next 18 months of from year 2025.
         3. If specific information cannot be determined, return an empty JSON for that field.
+
 
         Your response should be a JSON object like this:
 
