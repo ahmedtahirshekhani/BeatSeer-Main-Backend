@@ -25,7 +25,15 @@ musicbrainzngs.set_useragent("BeetSeer_AI_Backend", "1.0", "ahmedtahir.developer
 import re
 import time
 
+from requests.adapters import HTTPAdapter
+import urllib3
+from urllib3.util import connection
+import socket
+def allowed_gai_family():
+    return socket.AF_INET  # forces use of IPv4
 
+# Patch the connection module globally
+connection.allowed_gai_family = allowed_gai_family
 MONGODB_URI=os.getenv("MONGODB_URI")
 
 
@@ -105,10 +113,14 @@ def get_date_range():
 def collect_lastfm():
     print("Collecting LastFM data")
     url = 'https://www.last.fm/charts/weekly?page=0'
-    html_data = requests.get(url).text
+    # Create session using IPv4 adapter
+    session = requests.Session()
+    session.mount('https://', HTTPAdapter())
+    
+    html_data = session.get(url).text
     soup = BeautifulSoup(html_data, 'html.parser')
     date_range = get_date_range()
-    if soup.find("h3") is None:
+    if soup.find("h3") is not None:
         try:
             date_range = soup.find("h3").get_text(strip=True)
             date_range = date_range.replace(" ", "").replace("—", "-").lower()
@@ -127,7 +139,8 @@ def collect_lastfm():
         dfs_list = []
         for i in range(0, 4):
             url = f'https://www.last.fm/charts/weekly?page={i+1}'
-            tables = pd.read_html(url)
+            html_data = session.get(url).text  # Use IPv4-enforced session
+            tables = pd.read_html(html_data)
             chart_table = tables[0]
             chart_table["artist_name"] = chart_table["Artist.1"].str.extract(r'^(.*?)(?=\s\d)')
             main_df = chart_table[['artist_name', 'Listeners', 'Scrobbles']]
@@ -235,34 +248,37 @@ def fetch_info(html):
 def get_lastfm_new_art():
     dfs = []
 
-    for i in range(0, 3):
+    # Create session that enforces IPv4
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter())
 
-        url = "https://www.last.fm/tag/new/artists?page=" + str(i + 1)
-        html = requests.get(url).text
+    for i in range(0, 3):
+        url = f"https://www.last.fm/tag/new/artists?page={i + 1}"
+        html = session.get(url).text
 
         soup = BeautifulSoup(html, "html.parser")
         artists = []
         for artist_section in soup.find_all("li", class_="big-artist-list-wrap", itemscope=True):
             artist_name = artist_section.find("h3", class_="big-artist-list-title").get_text(strip=True)
 
-            url = 'https://www.last.fm/music/' + artist_name.replace(' ', '+')
-            html_data = requests.get(url).text
-            artist_det = fetch_info(html_data)    
+            artist_url = 'https://www.last.fm/music/' + artist_name.replace(' ', '+')
+            html_data = session.get(artist_url).text
+            artist_det = fetch_info(html_data)
             artists.append(artist_det)    
         dfs.append(pd.DataFrame(artists))
 
 
 
     df = pd.concat(dfs).reset_index(drop=True)
-    df['artist'] = df['artist'].str.lower()
-    df['artist'] = df['artist'].str.strip()
-    df = df.dropna(subset=['artist'])
-    df = df.drop_duplicates(subset=['artist'])
-    df = df.reset_index(drop=True)
+    df['artist'] = df['artist'].str.lower().str.strip()
+    df = df.dropna(subset=['artist']).drop_duplicates(subset=['artist']).reset_index(drop=True)
     df['popularity'] = df['artist_followers'] / df['artist_followers'].sum() * 100
     df['popularity'] = df['popularity'].round(2)
-    df['country'] = get_artist_countries(df['artist']).values()
-    df = df[df['country'].isin(['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])]
+    df['country'] = list(get_artist_countries(df['artist']).values())
+    df = df[df['country'].isin([
+        'US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL',
+        'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'
+    ])]
 
     return df
 
@@ -435,15 +451,15 @@ def get_newsletter_data(
         
 
         for i in range(0, df.shape[0], 50):
-            art_ids = df.loc[i:i+49, 'artist_id'].tolist()
+            art_ids = df.iloc[i:i+50]['artist_id'].tolist()
           
             arts_genre = get_artist_genres(art_ids, sp)
             print("arts_genre", arts_genre)
             artist_ids = list(arts_genre.keys()) 
             genres = [arts_genre.get(artist_id, 'classic') for artist_id in artist_ids]   
             genres = ['classic' if genre == '' else genre for genre in genres]
-            print("genres", genres)         
-            df.loc[i:i+49, 'genre'] = genres
+            actual_len = len(df.iloc[i:i+50])         
+            df.loc[i:i+actual_len-1, 'genre'] = genres[:actual_len]
         
         print("Spotify data", df['genre'])
         
@@ -788,12 +804,14 @@ def get_newsletter_data(
                 response = requests.get(channel_url, params=channel_params)
                 if response.status_code == 200:
                     data = response.json()
-                    for channel in data['items']:
+                    for channel in data.get('items', []):
                         channel_id = channel['id']
                         channel_name = channel['snippet']['title']
-                        subscriber_count = channel['statistics']['subscriberCount']
-                        video_count = channel['statistics']['videoCount']
-                        view_count = channel['statistics']['viewCount']
+
+                        stats = channel.get('statistics', {})
+                        subscriber_count = stats.get('subscriberCount', 0)
+                        video_count = stats.get('videoCount', 0)
+                        view_count = stats.get('viewCount', 0)
                         df_yt_data.loc[df_yt_data['channel_id'] == channel_id, 'subscribers'] = subscriber_count
                         df_yt_data.loc[df_yt_data['channel_id'] == channel_id, 'videos'] = video_count
                         df_yt_data.loc[df_yt_data['channel_id'] == channel_id, 'views'] = view_count
