@@ -24,11 +24,12 @@ from datetime import datetime, timedelta
 musicbrainzngs.set_useragent("BeetSeer_AI_Backend", "1.0", "ahmedtahir.developer@gmail.com")
 import re
 import time
-
+import platform
 from requests.adapters import HTTPAdapter
 import urllib3
 from urllib3.util import connection
 import socket
+from urllib.parse import quote
 def allowed_gai_family():
     return socket.AF_INET  # forces use of IPv4
 
@@ -36,6 +37,17 @@ def allowed_gai_family():
 connection.allowed_gai_family = allowed_gai_family
 MONGODB_URI=os.getenv("MONGODB_URI")
 
+if platform.system() == 'Linux':
+    socket_options = [
+        (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1),
+        (socket.SOL_SOCKET, socket.SO_BINDTODEVICE, "eth0".encode()),
+        (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    ]
+else:  # Windows/Mac
+    socket_options = [
+        (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1),
+        (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    ]
 
 def get_artist_countries(artist_names):
     # print(artist_names)
@@ -108,52 +120,120 @@ def get_date_range():
     formatted_date_range = re.sub(r'\b0(\d)', r'\1', date_range)
     return formatted_date_range
 
+BASE_URL = "https://www.last.fm"
+def get_encoded_artist_url(artist_name):
+    """Properly encode artist names for URLs"""
+    return f"{BASE_URL}/music/{quote(artist_name)}"
 
+def create_lastfm_session():
+    """Create a session with IPv4 enforcement and proper headers"""
+    session = requests.Session()
+    
+    # Force IPv4 (platform-independent approach)
+    class ForceIPv4HTTPAdapter(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            kwargs['socket_options'] = [
+                (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1),
+                (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            ]
+            # Force IPv4 by specifying family
+            kwargs['source_address'] = ('0.0.0.0', 0)
+            super().init_poolmanager(*args, **kwargs)
+    
+    # Mount the adapter for both http and https
+    session.mount('http://', ForceIPv4HTTPAdapter())
+    session.mount('https://', ForceIPv4HTTPAdapter())
+    
+    # Set headers to mimic browser behavior
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    })
+    
+    return session
+
+def safe_request(session, url, max_retries=3):
+    """Handle requests with retries and delays"""
+    for attempt in range(max_retries):
+        try:
+            response = session.get(url)
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 403:
+                print(f"Blocked on attempt {attempt + 1} for {url}")
+                time.sleep(5 * (attempt + 1))  # Exponential backoff
+            else:
+                print(f"Unexpected status {response.status_code} for {url}")
+                return None
+        except Exception as e:
+            print(f"Request failed (attempt {attempt + 1}): {str(e)}")
+            time.sleep(2)
+    return None
 
 def collect_lastfm():
     print("Collecting LastFM data")
-    url = 'https://www.last.fm/charts/weekly?page=0'
-    # Create session using IPv4 adapter
-    session = requests.Session()
-    session.mount('https://', HTTPAdapter())
+    session = create_lastfm_session()
     
-    html_data = session.get(url).text
-    soup = BeautifulSoup(html_data, 'html.parser')
-    date_range = get_date_range()
-    if soup.find("h3") is not None:
-        try:
-            date_range = soup.find("h3").get_text(strip=True)
-            date_range = date_range.replace(" ", "").replace("—", "-").lower()
-            date_range = re.sub(r'\b0(\d)', r'\1', date_range)
-        except:
-            date_range = get_date_range()
+    try:
+        # Get date range from first page
+        url = f"{BASE_URL}/charts/weekly?page=1"
+        response = safe_request(session, url)
+        if not response:
+            print("Failed to fetch initial page")
+            return
 
+        soup = BeautifulSoup(response.text, 'html.parser')
+        date_range = get_date_range()  # Your existing fallback function
         
+        if soup.find("h3"):
+            try:
+                date_text = soup.find("h3").get_text(strip=True)
+                date_range = date_text.replace(" ", "").replace("—", "-").lower()
+                date_range = re.sub(r'\b0(\d)', r'\1', date_range)
+            except Exception as e:
+                print(f"Error parsing date: {str(e)}")
 
-    client = MongoClient(MONGODB_URI)
-    db = client.musictrend
-    collection = db.lastfm_top200
-    count = collection.count_documents({})
-    check = collection.find_one({'date_range': date_range})
-    if not check:
-        dfs_list = []
-        for i in range(0, 4):
-            url = f'https://www.last.fm/charts/weekly?page={i+1}'
-            html_data = session.get(url).text  # Use IPv4-enforced session
-            tables = pd.read_html(html_data)
-            chart_table = tables[0]
-            chart_table["artist_name"] = chart_table["Artist.1"].str.extract(r'^(.*?)(?=\s\d)')
-            main_df = chart_table[['artist_name', 'Listeners', 'Scrobbles']]
-            main_df.reset_index(drop=True, inplace=True)
-            main_df = main_df.copy()
-            main_df.loc[:, 'rank'] = main_df.index + 1 + i * 50
-            main_df.rename(columns={'Listeners': 'listeners', 'Scrobbles': 'scrobbles'}, inplace=True)
-            dfs_list.append(main_df)
-        main_df = pd.concat(dfs_list).reset_index(drop=True)
-        collection.insert_one({'count': count+1, 'data': main_df.to_dict(orient='records'), 'date_range': date_range})
-
-    client.close()
-    print("LastFM data collected")
+        client = MongoClient(MONGODB_URI)
+        db = client.musictrend
+        collection = db.lastfm_top200
+        
+        if not collection.find_one({'date_range': date_range}):
+            dfs_list = []
+            for i in range(1, 5):  # Pages 1-4
+                url = f"{BASE_URL}/charts/weekly?page={i}"
+                response = safe_request(session, url)
+                if not response:
+                    continue
+                
+                try:
+                    tables = pd.read_html(response.text)
+                    chart_table = tables[0]
+                    chart_table["artist_name"] = chart_table["Artist.1"].str.extract(r'^(.*?)(?=\s\d)')
+                    main_df = chart_table[['artist_name', 'Listeners', 'Scrobbles']]
+                    main_df.reset_index(drop=True, inplace=True)
+                    main_df = main_df.copy()
+                    main_df.loc[:, 'rank'] = main_df.index + 1 + (i-1) * 50
+                    main_df.rename(columns={
+                        'Listeners': 'listeners', 
+                        'Scrobbles': 'scrobbles'
+                    }, inplace=True)
+                    dfs_list.append(main_df)
+                    time.sleep(2)  # Respectful delay
+                except Exception as e:
+                    print(f"Error processing page {i}: {str(e)}")
+            
+            if dfs_list:
+                main_df = pd.concat(dfs_list).reset_index(drop=True)
+                collection.insert_one({
+                    'count': collection.count_documents({}) + 1,
+                    'data': main_df.to_dict(orient='records'),
+                    'date_range': date_range
+                })
+        
+    finally:
+        client.close()
+        print("LastFM data collection completed")
 
 
 
@@ -246,42 +326,53 @@ def fetch_info(html):
 
 
 def get_lastfm_new_art():
+    session = create_lastfm_session()
     dfs = []
 
-    # Create session that enforces IPv4
-    session = requests.Session()
-    session.mount("https://", HTTPAdapter())
+    for i in range(1, 4):  # Pages 1-3
+        url = f"{BASE_URL}/tag/new/artists?page={i}"
+        response = safe_request(session, url)
+        if not response:
+            continue
 
-    for i in range(0, 3):
-        url = f"https://www.last.fm/tag/new/artists?page={i + 1}"
-        html = session.get(url).text
-
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(response.text, "html.parser")
         artists = []
+        
         for artist_section in soup.find_all("li", class_="big-artist-list-wrap", itemscope=True):
-            artist_name = artist_section.find("h3", class_="big-artist-list-title").get_text(strip=True)
+            artist_name_elem = artist_section.find("h3", class_="big-artist-list-title")
+            if not artist_name_elem:
+                continue
+                
+            artist_name = artist_name_elem.get_text(strip=True)
+            artist_url = get_encoded_artist_url(artist_name)
+            
+            artist_response = safe_request(session, artist_url)
+            if artist_response:
+                artist_det = fetch_info(artist_response.text)
+                if artist_det:
+                    artists.append(artist_det)
+            time.sleep(1)  # Delay between artist requests
+        
+        if artists:
+            dfs.append(pd.DataFrame(artists))
+        time.sleep(3)  # Delay between page requests
 
-            artist_url = 'https://www.last.fm/music/' + artist_name.replace(' ', '+')
-            html_data = session.get(artist_url).text
-            artist_det = fetch_info(html_data)
-            artists.append(artist_det)    
-        dfs.append(pd.DataFrame(artists))
-
-
+    if not dfs:
+        return pd.DataFrame()
 
     df = pd.concat(dfs).reset_index(drop=True)
     df['artist'] = df['artist'].str.lower().str.strip()
     df = df.dropna(subset=['artist']).drop_duplicates(subset=['artist']).reset_index(drop=True)
-    df['popularity'] = df['artist_followers'] / df['artist_followers'].sum() * 100
-    df['popularity'] = df['popularity'].round(2)
-    df['country'] = list(get_artist_countries(df['artist']).values())
-    df = df[df['country'].isin([
-        'US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL',
-        'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'
-    ])]
+    
+    if not df.empty:
+        df['popularity'] = (df['artist_followers'] / df['artist_followers'].sum() * 100).round(2)
+        df['country'] = list(get_artist_countries(df['artist']).values())
+        df = df[df['country'].isin([
+            'US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL',
+            'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'
+        ])]
 
     return df
-
 
 def fetch_or_update_kworb_data(date_range, category='global_daily'):
     client = MongoClient(MONGODB_URI)
