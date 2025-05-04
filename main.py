@@ -998,7 +998,7 @@ def get_newsletter_data(
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         prompt = """
         You are an AI model tasked with providing the following information about recording artists or groups for near-term media projects. Respond strictly in JSON format.
-        Artitst should ONLY be from these countries (["United States", "Canada", "Mexico", "United Kingdom", "France", "Germany", "Italy", "Spain", "Netherlands", "Belgium", "Switzerland", "Austria", "Sweden", "Norway", "Denmark", "Finland", "Ireland", "Portugal", "Luxembourg", "Iceland"])
+        Artitst should ONLY be from these countries (['US', 'CA', 'MX', 'GB', 'FR', 'DE', 'IT', 'ES', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'DK', 'FI', 'IE', 'PT', 'LU', 'IS'])
 
         1. Identify five {{artist_type}} recording artists or groups that would be suitable for films currently in development or production, slated for release within the next 18 months year 2025.
         2. These artists or groups should have an AI-predicted likelihood of maintaining or increasing their popularity over the next 18 months of from year 2025.
@@ -1013,7 +1013,8 @@ def get_newsletter_data(
             "name": "Artist or Group Name",
             "projected_growth": number,
             "genre": "Genre of music",
-            "genre_compatibility": from [LOW, MEDIUM, HIGH, VERY HIGH]
+            "genre_compatibility": from [LOW, MEDIUM, HIGH, VERY HIGH],
+            "country": "Country of the artistm in short form"
             }
         ]
         }
